@@ -1,7 +1,10 @@
 import glob
 import re
 from pathlib import Path
+
 import pandas as pd
+import numpy as np
+import xarray as xr
 
 # =========================
 # Paths
@@ -9,6 +12,10 @@ import pandas as pd
 INPUT_DIR = Path("./fluxnet/BIF")
 OUTPUT_DIR = Path("./fluxnet/BIF_summary")
 MODEL_ET_DIR = Path("./fluxnet_model_output/DD/ET_predictions")
+
+DRYNESS_INDEX_FILE = Path(
+    "../WettingDryingWorld/output/era5/pet_penman/yearly/dryness_index_yearly.nc"
+)
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -50,6 +57,7 @@ OUTPUT_COLUMNS = [
     "MAT",
     "MAP",
     "NETWORK",
+    "dryness_index_mean",
 ]
 
 # =========================
@@ -118,10 +126,108 @@ def save_igbp_count(df, out_file, count_col_name):
 
 
 # =========================
+# Dryness index functions
+# =========================
+def load_mean_dryness_index(nc_file):
+    """
+    Read dryness_index_yearly.nc and compute multi-year mean.
+
+    Returns
+    -------
+    da_mean : xarray.DataArray
+        Multi-year mean dryness index.
+    lat_name : str
+        Latitude coordinate name.
+    lon_name : str
+        Longitude coordinate name.
+    """
+    if not nc_file.exists():
+        raise FileNotFoundError(f"Dryness index file not found: {nc_file}")
+
+    ds = xr.open_dataset(nc_file)
+
+    if "dryness_index" in ds.data_vars:
+        da = ds["dryness_index"]
+    elif len(ds.data_vars) == 1:
+        da = ds[list(ds.data_vars)[0]]
+    else:
+        raise ValueError(
+            f"Cannot determine dryness index variable automatically. "
+            f"Available variables: {list(ds.data_vars)}"
+        )
+
+    # Mean over time/year dimension if present
+    mean_dims = [d for d in da.dims if d.lower() in ["time", "year"]]
+    if mean_dims:
+        da_mean = da.mean(dim=mean_dims, skipna=True)
+    else:
+        da_mean = da
+
+    # Detect lat/lon coordinate names
+    lat_name = None
+    lon_name = None
+
+    for c in da_mean.coords:
+        cl = c.lower()
+        if cl in ["lat", "latitude", "y"]:
+            lat_name = c
+        elif cl in ["lon", "longitude", "x"]:
+            lon_name = c
+
+    if lat_name is None or lon_name is None:
+        raise ValueError(
+            f"Cannot identify latitude/longitude coordinates from: {list(da_mean.coords)}"
+        )
+
+    return da_mean, lat_name, lon_name
+
+
+def extract_dryness_index_for_site(da_mean, lat_name, lon_name, lat, lon):
+    """
+    Extract nearest-grid dryness index mean for one site.
+    """
+    try:
+        lat = float(lat)
+        lon = float(lon)
+    except Exception:
+        return np.nan
+
+    if np.isnan(lat) or np.isnan(lon):
+        return np.nan
+
+    lon_values = da_mean[lon_name].values
+    lon_min = np.nanmin(lon_values)
+    lon_max = np.nanmax(lon_values)
+
+    # If grid longitude is 0~360 and site longitude is negative
+    if lon_min >= 0 and lon_max > 180 and lon < 0:
+        lon = lon % 360
+
+    # If grid longitude is -180~180 and site longitude is >180
+    elif lon_min < 0 and lon_max <= 180 and lon > 180:
+        lon = ((lon + 180) % 360) - 180
+
+    try:
+        value = da_mean.sel(
+            {lat_name: lat, lon_name: lon},
+            method="nearest"
+        ).item()
+        return value
+    except Exception:
+        return np.nan
+
+
+# =========================
 # Main
 # =========================
 def main():
     records = []
+
+    # Load dryness index mean field once
+    print(f"[INFO] Loading dryness index: {DRYNESS_INDEX_FILE}")
+    da_dry_mean, lat_name, lon_name = load_mean_dryness_index(DRYNESS_INDEX_FILE)
+    print(f"[INFO] Dryness index loaded successfully.")
+    print(f"[INFO] Coordinates: lat={lat_name}, lon={lon_name}")
 
     bif_files = sorted(glob.glob(str(INPUT_DIR / "*.csv")))
     if not bif_files:
@@ -167,6 +273,18 @@ def main():
         y1 = to_year(record["PRODUCT_FIRST_YEAR"])
         y2 = to_year(record["PRODUCT_LAST_YEAR"])
         record["Temporal_extent"] = y2 - y1 + 1 if y1 is not None and y2 is not None else ""
+
+        # Extract dryness_index_mean using site lat/lon
+        lat = pd.to_numeric(clean(record["LOCATION_LAT"]), errors="coerce")
+        lon = pd.to_numeric(clean(record["LOCATION_LONG"]), errors="coerce")
+
+        record["dryness_index_mean"] = extract_dryness_index_for_site(
+            da_mean=da_dry_mean,
+            lat_name=lat_name,
+            lon_name=lon_name,
+            lat=lat,
+            lon=lon,
+        )
 
         records.append(record)
 
