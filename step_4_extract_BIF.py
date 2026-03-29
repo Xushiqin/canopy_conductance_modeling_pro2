@@ -13,9 +13,9 @@ INPUT_DIR = Path("./fluxnet/BIF")
 OUTPUT_DIR = Path("./fluxnet/BIF_summary")
 MODEL_ET_DIR = Path("./fluxnet_model_output/DD/ET_predictions")
 
-DRYNESS_INDEX_FILE = Path(
-    "../WettingDryingWorld/output/era5/pet_penman/yearly/dryness_index_yearly.nc"
-)
+INDEX_DIR = Path("../WettingDryingWorld/output/era5/pet_penman/yearly")
+DRYNESS_INDEX_FILE = INDEX_DIR / "dryness_index_yearly.nc"
+EVAPORATION_INDEX_FILE = INDEX_DIR / "evaporation_index_yearly.nc"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -58,6 +58,7 @@ OUTPUT_COLUMNS = [
     "MAP",
     "NETWORK",
     "dryness_index_mean",
+    "evaporation_index_mean",
 ]
 
 # =========================
@@ -126,33 +127,40 @@ def save_igbp_count(df, out_file, count_col_name):
 
 
 # =========================
-# Dryness index functions
+# NetCDF index functions
 # =========================
-def load_mean_dryness_index(nc_file):
+def load_mean_index(nc_file, preferred_var_name=None):
     """
-    Read dryness_index_yearly.nc and compute multi-year mean.
+    Read yearly nc file and compute multi-year mean.
+
+    Parameters
+    ----------
+    nc_file : Path
+        NetCDF file path.
+    preferred_var_name : str or None
+        Preferred variable name to read from dataset.
 
     Returns
     -------
     da_mean : xarray.DataArray
-        Multi-year mean dryness index.
+        Multi-year mean field.
     lat_name : str
         Latitude coordinate name.
     lon_name : str
         Longitude coordinate name.
     """
     if not nc_file.exists():
-        raise FileNotFoundError(f"Dryness index file not found: {nc_file}")
+        raise FileNotFoundError(f"Index file not found: {nc_file}")
 
     ds = xr.open_dataset(nc_file)
 
-    if "dryness_index" in ds.data_vars:
-        da = ds["dryness_index"]
+    if preferred_var_name is not None and preferred_var_name in ds.data_vars:
+        da = ds[preferred_var_name]
     elif len(ds.data_vars) == 1:
         da = ds[list(ds.data_vars)[0]]
     else:
         raise ValueError(
-            f"Cannot determine dryness index variable automatically. "
+            f"Cannot determine variable automatically for {nc_file.name}. "
             f"Available variables: {list(ds.data_vars)}"
         )
 
@@ -182,9 +190,9 @@ def load_mean_dryness_index(nc_file):
     return da_mean, lat_name, lon_name
 
 
-def extract_dryness_index_for_site(da_mean, lat_name, lon_name, lat, lon):
+def extract_index_for_site(da_mean, lat_name, lon_name, lat, lon):
     """
-    Extract nearest-grid dryness index mean for one site.
+    Extract nearest-grid multi-year mean index value for one site.
     """
     try:
         lat = float(lat)
@@ -225,9 +233,21 @@ def main():
 
     # Load dryness index mean field once
     print(f"[INFO] Loading dryness index: {DRYNESS_INDEX_FILE}")
-    da_dry_mean, lat_name, lon_name = load_mean_dryness_index(DRYNESS_INDEX_FILE)
+    da_dry_mean, lat_name_dry, lon_name_dry = load_mean_index(
+        DRYNESS_INDEX_FILE,
+        preferred_var_name="dryness_index"
+    )
     print(f"[INFO] Dryness index loaded successfully.")
-    print(f"[INFO] Coordinates: lat={lat_name}, lon={lon_name}")
+    print(f"[INFO] Dryness coords: lat={lat_name_dry}, lon={lon_name_dry}")
+
+    # Load evaporation index mean field once
+    print(f"[INFO] Loading evaporation index: {EVAPORATION_INDEX_FILE}")
+    da_ei_mean, lat_name_ei, lon_name_ei = load_mean_index(
+        EVAPORATION_INDEX_FILE,
+        preferred_var_name="evaporation_index"
+    )
+    print(f"[INFO] Evaporation index loaded successfully.")
+    print(f"[INFO] Evaporation coords: lat={lat_name_ei}, lon={lon_name_ei}")
 
     bif_files = sorted(glob.glob(str(INPUT_DIR / "*.csv")))
     if not bif_files:
@@ -274,14 +294,24 @@ def main():
         y2 = to_year(record["PRODUCT_LAST_YEAR"])
         record["Temporal_extent"] = y2 - y1 + 1 if y1 is not None and y2 is not None else ""
 
-        # Extract dryness_index_mean using site lat/lon
+        # Extract station lat/lon
         lat = pd.to_numeric(clean(record["LOCATION_LAT"]), errors="coerce")
         lon = pd.to_numeric(clean(record["LOCATION_LONG"]), errors="coerce")
 
-        record["dryness_index_mean"] = extract_dryness_index_for_site(
+        # Extract dryness_index_mean using site lat/lon
+        record["dryness_index_mean"] = extract_index_for_site(
             da_mean=da_dry_mean,
-            lat_name=lat_name,
-            lon_name=lon_name,
+            lat_name=lat_name_dry,
+            lon_name=lon_name_dry,
+            lat=lat,
+            lon=lon,
+        )
+
+        # Extract evaporation_index_mean using site lat/lon
+        record["evaporation_index_mean"] = extract_index_for_site(
+            da_mean=da_ei_mean,
+            lat_name=lat_name_ei,
+            lon_name=lon_name_ei,
             lat=lat,
             lon=lon,
         )

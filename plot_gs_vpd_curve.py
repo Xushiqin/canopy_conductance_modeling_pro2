@@ -67,5 +67,5 @@ plt.legend(frameon=False)
 plt.grid(True, linestyle="--", alpha=0.4)
 
 plt.tight_layout()
-plt.savefig("./figures/VPD_gs_theoretical_curves_with_SWC.png", dpi=300)
+plt.savefig("./figures/VPD_gs_theoretical_curves_with_SWC.jpg", dpi=300)
 plt.show()
